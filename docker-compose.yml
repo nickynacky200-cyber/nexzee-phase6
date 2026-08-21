@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nexzee_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexzee
+      POSTGRES_PASSWORD: nexzee_password
+      POSTGRES_DB: nexzee_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - nexzee_pg_data:/var/lib/postgresql/data
+
+volumes:
+  nexzee_pg_data:
