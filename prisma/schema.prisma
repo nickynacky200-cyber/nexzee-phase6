@@ -1,0 +1,300 @@
+// NEXZEE Database Schema
+// Phase 1 — Core models for auth, wallet ledger, and order tracking.
+// Payment/Peyflex-specific fields will be extended in Phase 3/4 once those
+// integrations are locked in.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// AUTH & USERS
+// ─────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(uuid())
+  fullName      String
+  email         String    @unique
+  phone         String    @unique
+  passwordHash  String
+  isActive      Boolean   @default(true)
+  isSuspended   Boolean   @default(false)
+  emailVerifiedAt DateTime?
+
+  wallet          Wallet?
+  orders          Order[]
+  payments        Payment[]
+  notifications   Notification[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
+
+model Admin {
+  id           String   @id @default(uuid())
+  fullName     String
+  email        String   @unique
+  passwordHash String
+  role         AdminRole @default(SUPPORT)
+  isActive     Boolean  @default(true)
+
+  auditLogs AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("admins")
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  SUPPORT
+}
+
+// ─────────────────────────────────────────────
+// WALLET & LEDGER
+// ─────────────────────────────────────────────
+
+model Wallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id])
+  balance   Decimal  @default(0) @db.Decimal(18, 2)
+
+  // Dedicated virtual account details (Paystack) — populated in Phase 3
+  virtualAccountBankName    String?
+  virtualAccountNumber      String?
+  virtualAccountReference   String?
+  paystackCustomerCode      String?
+
+  transactions WalletTransaction[]
+  deposits     Deposit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("wallets")
+}
+
+// Immutable ledger. Every balance movement is recorded here.
+// Never update balance without inserting a corresponding row.
+model WalletTransaction {
+  id             String   @id @default(uuid())
+  walletId       String
+  wallet         Wallet   @relation(fields: [walletId], references: [id])
+
+  type           WalletTransactionType
+  amount         Decimal  @db.Decimal(18, 2)
+  balanceBefore  Decimal  @db.Decimal(18, 2)
+  balanceAfter   Decimal  @db.Decimal(18, 2)
+
+  reference      String   @unique
+  status         TransactionStatus @default(SUCCESSFUL)
+  description    String?
+
+  // Optional links back to the source of the movement
+  depositId      String?
+  orderId        String?
+  order          Order?   @relation(fields: [orderId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([walletId])
+  @@map("wallet_transactions")
+}
+
+enum WalletTransactionType {
+  DEPOSIT
+  PURCHASE
+  REFUND
+  ADJUSTMENT
+}
+
+model Deposit {
+  id              String   @id @default(uuid())
+  walletId        String
+  wallet          Wallet   @relation(fields: [walletId], references: [id])
+
+  amount          Decimal  @db.Decimal(18, 2)
+  paymentId       String?  @unique
+  payment         Payment? @relation(fields: [paymentId], references: [id])
+
+  status          TransactionStatus @default(PENDING)
+  reference       String   @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("deposits")
+}
+
+// ─────────────────────────────────────────────
+// PAYMENTS (Paystack) — extended in Phase 3
+// ─────────────────────────────────────────────
+
+model Payment {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+
+  provider    String   @default("paystack")
+  reference   String   @unique
+  amount      Decimal  @db.Decimal(18, 2)
+  status      TransactionStatus @default(PENDING)
+  rawPayload  Json?
+
+  deposit     Deposit?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payments")
+}
+
+// Prevents duplicate webhook processing (Paystack + Peyflex both use this)
+model WebhookEvent {
+  id          String   @id @default(uuid())
+  provider    String
+  eventId     String   @unique
+  eventType   String
+  payload     Json
+  processedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  @@map("webhook_events")
+}
+
+// ─────────────────────────────────────────────
+// ORDERS / PURCHASES (Data, Airtime, Cable, etc.)
+// ─────────────────────────────────────────────
+
+model Order {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+
+  type            OrderType
+  status          TransactionStatus @default(PENDING)
+
+  sellingPrice    Decimal  @db.Decimal(18, 2)
+  providerCost    Decimal? @db.Decimal(18, 2)
+  profit          Decimal? @db.Decimal(18, 2)
+
+  reference       String   @unique
+
+  items           OrderItem[]
+  providerTx      ProviderTransaction?
+  walletTx        WalletTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("orders")
+}
+
+enum OrderType {
+  DATA
+  AIRTIME
+  CABLE_TV
+  ELECTRICITY
+  BETTING
+  EDUCATION
+  RECHARGE_CARD
+  VIRTUAL_NUMBER
+}
+
+// Flexible key-value detail store per order (network, plan, phone, IUC, etc.)
+// Kept generic since not all Peyflex service param shapes are confirmed yet.
+model OrderItem {
+  id        String   @id @default(uuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id])
+  key       String
+  value     String
+
+  @@map("order_items")
+}
+
+// Raw record of what Peyflex returned — kept separately from Order so we
+// never lose provider-side debugging info (transaction_id, provider ref, etc.)
+model ProviderTransaction {
+  id                String   @id @default(uuid())
+  orderId           String   @unique
+  order             Order    @relation(fields: [orderId], references: [id])
+
+  provider          String   @default("peyflex")
+  providerReference String?
+  providerTxId      String?
+  status            String?
+  rawResponse       Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("provider_transactions")
+}
+
+// Cached Peyflex data plans (refresh periodically via a sync job in a later phase)
+model DataPlan {
+  id          String   @id @default(uuid())
+  network     String
+  planCode    String
+  name        String
+  price       Decimal  @db.Decimal(18, 2)
+  isActive    Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([network, planCode])
+  @@map("data_plans")
+}
+
+// ─────────────────────────────────────────────
+// SHARED ENUMS
+// ─────────────────────────────────────────────
+
+enum TransactionStatus {
+  PENDING
+  SUCCESSFUL
+  FAILED
+  REFUNDED
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS & AUDIT
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@map("notifications")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  adminId     String
+  admin       Admin    @relation(fields: [adminId], references: [id])
+  action      String
+  targetType  String?
+  targetId    String?
+  reason      String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@map("audit_logs")
+}
