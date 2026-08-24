@@ -96,12 +96,12 @@ export async function creditWalletForConfirmedPayment(params: {
   }
 
   const deposit = await prisma.deposit.create({
-    data: {
-      wallet: { connect: { userId: params.userId } },
-      amount: params.amountNaira,
-      paymentId: payment.id,
-      status: TransactionStatus.SUCCESSFUL,
-      reference: generateReference("DEP"),
+  data: {
+    wallet: { connect: { userId: params.userId } },
+    payment: { connect: { id: payment.id } },
+    amount: params.amountNaira,
+    status: TransactionStatus.SUCCESSFUL,
+    reference: generateReference("DEP"),
     },
   });
 
